@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "raven-news"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "clap",
