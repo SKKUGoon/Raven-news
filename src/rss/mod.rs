@@ -1,9 +1,10 @@
 pub mod bloomberg;
 pub mod coindesk;
+pub mod politico;
 pub mod reuters;
 
-use chrono::{DateTime, Utc};
 use crate::error::RssParseError;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

@@ -2,7 +2,7 @@ use crate::db::insert_rss_item;
 use crate::error::RssIngestionError;
 use crate::rss::{
     RssParser, bloomberg::BloombergRssParser, coindesk::CoindeskRssParser,
-    reuters::ReutersRssParser,
+    politico::PoliticoRssParser, reuters::ReutersRssParser,
 };
 use sqlx::PgPool;
 use tokio::select;
@@ -19,8 +19,9 @@ struct Feed {
 static BLOOMBERG: BloombergRssParser = BloombergRssParser;
 static COINDESK: CoindeskRssParser = CoindeskRssParser;
 static REUTERS: ReutersRssParser = ReutersRssParser;
+static POLITICO: PoliticoRssParser = PoliticoRssParser;
 
-const FEEDS: [Feed; 7] = [
+const FEEDS: [Feed; 10] = [
     Feed {
         name: "bloomberg_wealth",
         url: "https://feeds.bloomberg.com/wealth/news.rss",
@@ -62,6 +63,24 @@ const FEEDS: [Feed; 7] = [
         url: "https://ir.thomsonreuters.com/rss/sec-filings.xml?items=15",
         parser: &REUTERS,
         active: false,
+    },
+    Feed {
+        name: "politico_congress",
+        url: "https://rss.politico.com/congress.xml",
+        parser: &POLITICO,
+        active: true,
+    },
+    Feed {
+        name: "politico_economy",
+        url: "https://rss.politico.com/economy.xml",
+        parser: &POLITICO,
+        active: true,
+    },
+    Feed {
+        name: "politico_politics",
+        url: "https://rss.politico.com/politics-news.xml",
+        parser: &POLITICO,
+        active: true,
     },
 ];
 

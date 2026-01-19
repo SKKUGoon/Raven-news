@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use raven_news::db::create_pg_pool;
-use sqlx::PgPool;
 use raven_news::db::stats::{count_daily_rss_items, count_source_rss_items, count_total_rss_items};
 use raven_news::ingest::{fetch_all_and_insert, run_scheduler};
+use sqlx::PgPool;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, filter::Directive};
 
