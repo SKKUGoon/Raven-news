@@ -6,10 +6,10 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 
 ## Highlights
 
-- CLI with `fetch-once`, long-running `run`, and rich `stats` sub-commands for day-to-day operations.
+- Unified CLI for RSS + Polymarket ingestion, including one-shot, scheduler, backfill, and stats commands.
 - Source-specific RSS parsers built with `quick-xml`, each conforming to a shared `RssParser` trait.
 - Stable `RssItem` identifiers generated with SHA-256 fingerprints to avoid duplicates across runs.
-- PostgreSQL-backed persistence layer powered by `sqlx`, with database statistics helpers.
+- PostgreSQL-backed persistence layer powered by `sqlx`, with dedicated warehouse tables for RSS and Polymarket markets.
 - Async-ready foundation using `tokio`, structured logging via `tracing`, and integration tests with sample feeds.
 
 ## Developer Prerequisites
@@ -72,9 +72,13 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
    RUST_LOG=info
    EOF
    ```
-6. Verify the connection and insert a snapshot of items:
+6. Verify the connection and insert RSS snapshot items:
    ```bash
    cargo run -- fetch-once
+   ```
+7. (Optional) Run Polymarket backfill (guarded by confirmation):
+   ```bash
+   cargo run -- backfill
    ```
 
 ## Configuration
@@ -82,16 +86,29 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 - `DATABASE_URL` must be provided; `dotenvy` will automatically load a local `.env` file.
 - Logging is handled by `tracing` with `EnvFilter`; set `RUST_LOG=debug` to increase verbosity.
 - Modify the fetch cadence by editing `tokio::time::interval` in `src/ingest/mod.rs`.
+- Polymarket pagination/rate-limit tunables:
+  - `POLYMARKET_MAX_PAGES` (default `100`)
+  - `POLYMARKET_PAGE_LIMIT` (default `100`, max `100`)
+  - `POLYMARKET_REQUEST_DELAY_MS` (default `250`)
 
 ## CLI Usage
 
 | Command | Purpose |
 | --- | --- |
-| `cargo run -- fetch-once` | Fetch all configured RSS feeds once and persist them. |
-| `cargo run -- run` | Start the scheduler loop (polls every 60 seconds until `Ctrl+C`). |
-| `cargo run -- stats total` | Print the total number of stored RSS items. |
-| `cargo run -- stats daily` | Print the count of items ingested since midnight. |
-| `cargo run -- stats source <name>` | Print the count for a specific source (for example `reuters`). |
+| `cargo run -- fetch-once` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then run one-shot ingestion. |
+| `cargo run -- run` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then start the selected scheduler. |
+| `cargo run -- backfill` | Backfill Polymarket markets broadly using the events endpoint pagination (shows confirmation prompt). |
+| `cargo run -- stats` | Interactive selector: choose period first, then source (`polymarket` + distinct RSS sources from DB). |
+
+## Polymarket Ingestion
+
+- Source endpoint: `https://gamma-api.polymarket.com/events`.
+- Primary strategy: retrieve markets via paginated events (events include nested markets).
+- One-shot incremental sync is available through `fetch-once` by selecting `polymarket`.
+- Backfill sync (`backfill`) uses the same core pipeline without active/open filtering for broader market coverage.
+- Hourly sync is available through `run` by selecting `polymarket`.
+- Market rows are stored in `warehouse.polymarket_markets` with normalized fields plus full raw event/market payload snapshots.
+- `fetch-once` and `run` provide an interactive arrow-key selection between Polymarket and RSS ingestion.
 
 ## Parser Library
 
@@ -119,8 +136,10 @@ Each parser defers to `RssItem::new`, which produces deterministic UUIDs by hash
 ## Database Layout
 
 - Migration `100_create_warehouse_schema.sql` creates schema `warehouse` with table `rss_items`.
-- The table enforces unique `id` keys, stores canonical metadata, and timestamps every insert.
-- Database helpers in `src/db/stats.rs` expose total, daily, and per-source counts for reporting.
+- Migration `101_create_polymarket_markets.sql` adds table `warehouse.polymarket_markets`.
+- `warehouse.rss_items` stores normalized RSS items with deterministic UUID keys.
+- `warehouse.polymarket_markets` stores market/event metadata, lifecycle status, and raw payload snapshots.
+- Database helpers in `src/db/stats.rs` expose RSS total, daily, and per-source counts for reporting.
 
 ## Testing
 
