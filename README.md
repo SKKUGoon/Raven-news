@@ -102,7 +102,7 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 | --- | --- |
 | `cargo run -- fetch-once` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then run one-shot ingestion. |
 | `cargo run -- run` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then start the selected scheduler. |
-| `cargo run -- backfill` | Backfill Polymarket markets broadly using the events endpoint pagination (shows confirmation prompt). |
+| `cargo run -- backfill` | Backfill open Polymarket events using the events endpoint pagination (shows confirmation prompt). |
 | `cargo run -- stats` | Interactive selector: choose period first, then source (`polymarket` + distinct RSS sources from DB). |
 
 ## Polymarket Ingestion

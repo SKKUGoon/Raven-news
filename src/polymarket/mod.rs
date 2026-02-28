@@ -43,6 +43,10 @@ pub enum PolymarketIngestionError {
 struct EventInfo {
     event_id: String,
     title: Option<String>,
+    tag_slugs: Option<String>,
+    tags: Option<String>,
+    tag_labels: Option<String>,
+    end_date: Option<DateTime<Utc>>,
     active: bool,
     closed: bool,
     created_at: DateTime<Utc>,
@@ -81,11 +85,11 @@ async fn sync_events(
     let mut events_fetched = 0usize;
     let mut events_upserted = 0usize;
     let mut fetched_open = 0usize;
-    let mut fetched_closed = 0usize;
 
     let statuses: Vec<EventStatusQuery> = match mode {
-        SyncMode::Incremental => vec![EventStatusQuery::ActiveOpen, EventStatusQuery::Closed],
-        SyncMode::Backfill => vec![EventStatusQuery::Open, EventStatusQuery::Closed],
+        // Open-only fetch keeps memory/time lower but does not observe open->closed transitions.
+        SyncMode::Incremental => vec![EventStatusQuery::ActiveOpen],
+        SyncMode::Backfill => vec![EventStatusQuery::Open],
     };
 
     for status in statuses {
@@ -98,12 +102,7 @@ async fn sync_events(
             }
 
             events_fetched += events.len();
-            match status {
-                EventStatusQuery::ActiveOpen | EventStatusQuery::Open => {
-                    fetched_open += events.len()
-                }
-                EventStatusQuery::Closed => fetched_closed += events.len(),
-            }
+            fetched_open += events.len();
             let page_count = events.len();
             info!(
                 "Fetched Polymarket events {:?} page {} (offset={}, events={})",
@@ -124,6 +123,10 @@ async fn sync_events(
                     &PolymarketEventRow {
                         event_id: event_info.event_id,
                         event_title: event_info.title,
+                        event_tag_slugs: event_info.tag_slugs,
+                        event_tags: event_info.tags,
+                        event_tag_labels: event_info.tag_labels,
+                        end_date: event_info.end_date,
                         active: event_info.active,
                         closed: event_info.closed,
                         created_at: event_info.created_at,
@@ -143,10 +146,9 @@ async fn sync_events(
     }
 
     info!(
-        "Polymarket fetch summary: fetched_total={}, fetched_open={}, fetched_closed={}, upserted={}",
+        "Polymarket fetch summary: fetched_total={}, fetched_open={}, upserted={}",
         events_fetched,
         fetched_open,
-        fetched_closed,
         events_upserted
     );
 
@@ -241,7 +243,6 @@ async fn fetch_events_page(
 enum EventStatusQuery {
     ActiveOpen,
     Open,
-    Closed,
 }
 
 fn build_query(
@@ -257,9 +258,6 @@ fn build_query(
         }
         EventStatusQuery::Open => {
             query.push(("closed", "false".to_string()));
-        }
-        EventStatusQuery::Closed => {
-            query.push(("closed", "true".to_string()));
         }
     }
     query
@@ -278,9 +276,15 @@ fn events_from_response(value: Value) -> Vec<Value> {
 }
 
 fn extract_event_info(event: &Value) -> EventInfo {
+    let (tag_slugs, tags, tag_labels) = extract_event_tags(event);
+
     EventInfo {
         event_id: read_string(event, &["id", "eventId", "event_id"]).unwrap_or_default(),
         title: read_string(event, &["title", "name"]),
+        tag_slugs,
+        tags,
+        tag_labels,
+        end_date: read_datetime(event, &["endDate", "end_date"]),
         active: event.get("active").and_then(Value::as_bool).unwrap_or(true),
         closed: event
             .get("closed")
@@ -288,6 +292,49 @@ fn extract_event_info(event: &Value) -> EventInfo {
             .unwrap_or(false),
         created_at: read_datetime(event, &["createdAt", "creationDate"]).unwrap_or_else(Utc::now),
         updated_at: read_datetime(event, &["updatedAt"]).unwrap_or_else(Utc::now),
+    }
+}
+
+fn extract_event_tags(event: &Value) -> (Option<String>, Option<String>, Option<String>) {
+    let mut slugs: Vec<String> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
+
+    if let Some(tag_values) = event.get("tags").and_then(Value::as_array) {
+        for tag in tag_values {
+            let slug = read_string(tag, &["slug"]).map(|value| normalize_tag_value(&value));
+            let label = read_string(tag, &["label"]).map(|value| normalize_tag_value(&value));
+
+            if let Some(value) = slug.filter(|value| !value.is_empty()) {
+                push_unique(&mut slugs, value.clone());
+                push_unique(&mut tags, value);
+            }
+
+            if let Some(value) = label.filter(|value| !value.is_empty()) {
+                push_unique(&mut labels, value.clone());
+                push_unique(&mut tags, value);
+            }
+        }
+    }
+
+    (join_tag_values(slugs), join_tag_values(tags), join_tag_values(labels))
+}
+
+fn normalize_tag_value(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn join_tag_values(values: Vec<String>) -> Option<String> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join(", "))
     }
 }
 

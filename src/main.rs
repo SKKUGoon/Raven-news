@@ -29,7 +29,7 @@ enum Commands {
     /// Run continuous ingestion loop (every 60 seconds)
     Run,
 
-    /// Backfill Polymarket markets broadly (historical + active) with confirmation
+    /// Backfill open Polymarket events with confirmation
     Backfill,
 
     /// Show ingestion statistics (interactive period/source selector)
