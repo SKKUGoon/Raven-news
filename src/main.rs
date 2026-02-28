@@ -92,7 +92,7 @@ async fn handle_fetch_once_with_choice(pool: &PgPool) {
 async fn handle_run_with_choice(pool: PgPool) {
     match select_target("run") {
         IngestionTarget::Polymarket => {
-            info!("Running Polymarket hourly sync");
+            info!("Running Polymarket 30-minute sync");
             run_hourly_scheduler(pool).await;
         }
         IngestionTarget::NewsItems => {

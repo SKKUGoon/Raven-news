@@ -2,7 +2,6 @@ use crate::db::polymarket::{PolymarketEventRow, upsert_polymarket_event};
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 use thiserror::Error;
 use tokio::select;
@@ -81,10 +80,8 @@ async fn sync_events(
 
     let mut events_fetched = 0usize;
     let mut events_upserted = 0usize;
-    let mut merged: HashMap<String, EventInfo> = HashMap::new();
     let mut fetched_open = 0usize;
     let mut fetched_closed = 0usize;
-    let mut kept_events = 0usize;
 
     let statuses: Vec<EventStatusQuery> = match mode {
         SyncMode::Incremental => vec![EventStatusQuery::ActiveOpen, EventStatusQuery::Closed],
@@ -117,14 +114,24 @@ async fn sync_events(
             );
 
             for event in events {
-                kept_events += 1;
-
                 let event_info = extract_event_info(&event);
                 if event_info.event_id.is_empty() {
                     continue;
                 }
 
-                merged.insert(event_info.event_id.clone(), event_info);
+                upsert_polymarket_event(
+                    pool,
+                    &PolymarketEventRow {
+                        event_id: event_info.event_id,
+                        event_title: event_info.title,
+                        active: event_info.active,
+                        closed: event_info.closed,
+                        created_at: event_info.created_at,
+                        updated_at: event_info.updated_at,
+                    },
+                )
+                .await?;
+                events_upserted += 1;
             }
 
             if page_count < page_limit {
@@ -135,28 +142,11 @@ async fn sync_events(
         }
     }
 
-    for event_info in merged.into_values() {
-        upsert_polymarket_event(
-            pool,
-            &PolymarketEventRow {
-                event_id: event_info.event_id,
-                event_title: event_info.title,
-                active: event_info.active,
-                closed: event_info.closed,
-                created_at: event_info.created_at,
-                updated_at: event_info.updated_at,
-            },
-        )
-        .await?;
-        events_upserted += 1;
-    }
-
     info!(
-        "Polymarket fetch summary: fetched_total={}, fetched_open={}, fetched_closed={}, kept_events={}, upserted_unique={}",
+        "Polymarket fetch summary: fetched_total={}, fetched_open={}, fetched_closed={}, upserted={}",
         events_fetched,
         fetched_open,
         fetched_closed,
-        kept_events,
         events_upserted
     );
 
@@ -167,9 +157,9 @@ async fn sync_events(
 }
 
 pub async fn run_hourly_scheduler(pool: PgPool) {
-    let mut ticker = interval(Duration::from_secs(60 * 60));
+    let mut ticker = interval(Duration::from_secs(30 * 60));
 
-    info!("Polymarket scheduler started. Sync interval: 1 hour.");
+    info!("Polymarket scheduler started. Sync interval: 30 minutes.");
     loop {
         select! {
             _ = ticker.tick() => {
@@ -212,9 +202,9 @@ async fn fetch_events_page(
             .send()
             .await?;
         let status = response.status();
-        let body = response.text().await?;
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let body = response.text().await?;
             attempts += 1;
             if attempts > MAX_RETRIES_ON_429 {
                 return Err(PolymarketIngestionError::HttpStatus {
@@ -235,13 +225,14 @@ async fn fetch_events_page(
         }
 
         if !status.is_success() {
+            let body = response.text().await?;
             return Err(PolymarketIngestionError::HttpStatus {
                 status: status.as_u16(),
                 body,
             });
         }
 
-        let value: Value = serde_json::from_str(&body)?;
+        let value: Value = response.json().await?;
         return Ok(events_from_response(value));
     }
 }
