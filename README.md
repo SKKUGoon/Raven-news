@@ -90,6 +90,11 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
   - `POLYMARKET_MAX_PAGES` (default `100`)
   - `POLYMARKET_PAGE_LIMIT` (default `100`, max `100`)
   - `POLYMARKET_REQUEST_DELAY_MS` (default `250`)
+- Polymarket whitelist config lives in `polymarket_config.toml`:
+  ```toml
+  [whitelist]
+  tag_slugs = ["economy", "trade"]
+  ```
 
 ## CLI Usage
 
@@ -107,7 +112,7 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 - One-shot incremental sync is available through `fetch-once` by selecting `polymarket`.
 - Backfill sync (`backfill`) uses the same core pipeline without active/open filtering for broader market coverage.
 - Hourly sync is available through `run` by selecting `polymarket`.
-- Market rows are stored in `warehouse.polymarket_markets` with normalized fields plus full raw event/market payload snapshots.
+- Event rows are stored in `warehouse.polymarket_events` and synced by `event_id`.
 - `fetch-once` and `run` provide an interactive arrow-key selection between Polymarket and RSS ingestion.
 
 ## Parser Library
@@ -136,9 +141,11 @@ Each parser defers to `RssItem::new`, which produces deterministic UUIDs by hash
 ## Database Layout
 
 - Migration `100_create_warehouse_schema.sql` creates schema `warehouse` with table `rss_items`.
-- Migration `101_create_polymarket_markets.sql` adds table `warehouse.polymarket_markets`.
+- Migration `104_normalize_polymarket_events_markets.sql` adds `warehouse.polymarket_events` and normalizes market/event fields.
+- Migration `105_trim_polymarket_events_only.sql` trims Polymarket storage to event-only fields.
+- Migration `106_drop_unused_polymarket_tables.sql` removes deprecated Polymarket market/outcome tables.
 - `warehouse.rss_items` stores normalized RSS items with deterministic UUID keys.
-- `warehouse.polymarket_markets` stores market/event metadata, lifecycle status, and raw payload snapshots.
+- `warehouse.polymarket_events` stores event-level metadata: `event_id`, `event_title`, `active`, `closed`, `created_at`, `updated_at`.
 - Database helpers in `src/db/stats.rs` expose RSS total, daily, and per-source counts for reporting.
 
 ## Testing

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use dialoguer::{Confirm, Select, theme::ColorfulTheme};
 use dotenvy::dotenv;
 use raven_news::db::stats::{
-    StatsPeriod, count_polymarket_markets_by_period, count_rss_items_by_period_and_source,
+    StatsPeriod, count_polymarket_events_by_period, count_rss_items_by_period_and_source,
     list_distinct_rss_sources,
 };
 use raven_news::db::{create_pg_pool, get_connection_status};
@@ -133,8 +133,8 @@ async fn handle_polymarket_fetch_once(pool: &PgPool) {
     match fetch_and_sync_markets(pool).await {
         Ok(stats) => {
             println!(
-                "Polymarket sync complete: events={}, markets={}, matured={}",
-                stats.events_fetched, stats.markets_processed, stats.matured_markets
+                "Polymarket sync complete: fetched={}, upserted={}",
+                stats.events_fetched, stats.events_upserted
             );
         }
         Err(e) => {
@@ -160,8 +160,8 @@ async fn handle_polymarket_backfill(pool: &PgPool) {
     match backfill_markets(pool).await {
         Ok(stats) => {
             println!(
-                "Polymarket backfill complete: events={}, markets={}, matured={}",
-                stats.events_fetched, stats.markets_processed, stats.matured_markets
+                "Polymarket backfill complete: fetched={}, upserted={}",
+                stats.events_fetched, stats.events_upserted
             );
         }
         Err(e) => {
@@ -175,7 +175,7 @@ async fn handle_stats_interactive(pool: &PgPool) {
     let period = select_period();
     let (label, count) = match select_source(pool).await {
         StatsSource::Polymarket => {
-            let count = count_polymarket_markets_by_period(pool, period).await;
+            let count = count_polymarket_events_by_period(pool, period).await;
             ("polymarket".to_string(), count)
         }
         StatsSource::Rss(source) => {

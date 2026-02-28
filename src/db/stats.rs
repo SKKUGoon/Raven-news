@@ -91,7 +91,7 @@ pub async fn count_rss_items_by_period_and_source(
     Ok(count)
 }
 
-pub async fn count_polymarket_markets_by_period(
+pub async fn count_polymarket_events_by_period(
     pool: &PgPool,
     period: StatsPeriod,
 ) -> Result<i64, sqlx::Error> {
@@ -99,14 +99,14 @@ pub async fn count_polymarket_markets_by_period(
         StatsPeriod::AllTime => {
             r#"
             SELECT COUNT(*)::bigint
-            FROM warehouse.polymarket_markets
+            FROM warehouse.polymarket_events
             "#
         }
         StatsPeriod::Today => {
             r#"
             SELECT COUNT(*)::bigint
-            FROM warehouse.polymarket_markets
-            WHERE first_seen_at >= DATE_TRUNC('day', NOW())
+            FROM warehouse.polymarket_events
+            WHERE created_at >= DATE_TRUNC('day', NOW())
             "#
         }
     };

@@ -1,0 +1,14 @@
+[whitelist]
+tag_slugs = [
+  "peace-deals",
+  "trade",
+  "space-exploration",
+  "gdp",
+  "tariffs",
+  "doj",
+  "economy",
+  "european-union",
+  "homeland-security",
+  "britain",
+  "investments",
+]

@@ -1,9 +1,8 @@
-use crate::db::polymarket::{
-    PolymarketMarketRow, mark_missing_markets_as_matured, upsert_polymarket_market,
-};
+use crate::db::polymarket::{PolymarketEventRow, upsert_polymarket_event};
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 use thiserror::Error;
 use tokio::select;
@@ -20,14 +19,7 @@ const DEFAULT_RETRY_WAIT_MS: u64 = 1000;
 #[derive(Debug)]
 pub struct PolymarketSyncStats {
     pub events_fetched: usize,
-    pub markets_processed: usize,
-    pub matured_markets: i64,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum SyncMode {
-    ActiveOpen,
-    BackfillAll,
+    pub events_upserted: usize,
 }
 
 #[derive(Debug, Error)]
@@ -38,93 +30,139 @@ pub enum PolymarketIngestionError {
     Database(#[from] sqlx::Error),
     #[error("JSON decoding failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("TOML config parsing failed: {0}")]
+    ConfigParse(#[from] toml::de::Error),
+    #[error("Config read failed: {0}")]
+    ConfigRead(#[from] std::io::Error),
+    #[error("Polymarket config error: {0}")]
+    Config(String),
     #[error("Polymarket API returned status {status}: {body}")]
     HttpStatus { status: u16, body: String },
+}
+
+#[derive(Clone, Debug)]
+struct EventInfo {
+    event_id: String,
+    title: Option<String>,
+    active: bool,
+    closed: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 pub async fn fetch_and_sync_markets(
     pool: &PgPool,
 ) -> Result<PolymarketSyncStats, PolymarketIngestionError> {
-    sync_markets(pool, SyncMode::ActiveOpen).await
+    sync_events(pool, SyncMode::Incremental).await
 }
 
 pub async fn backfill_markets(
     pool: &PgPool,
 ) -> Result<PolymarketSyncStats, PolymarketIngestionError> {
-    sync_markets(pool, SyncMode::BackfillAll).await
+    sync_events(pool, SyncMode::Backfill).await
 }
 
-async fn sync_markets(
+#[derive(Clone, Copy, Debug)]
+enum SyncMode {
+    Incremental,
+    Backfill,
+}
+
+async fn sync_events(
     pool: &PgPool,
     mode: SyncMode,
 ) -> Result<PolymarketSyncStats, PolymarketIngestionError> {
     let client = reqwest::Client::builder()
         .timeout(StdDuration::from_secs(20))
         .build()?;
-    let sync_started_at = Utc::now();
     let max_pages = max_page_count();
     let page_limit = page_limit();
     let delay_between_requests = request_delay();
 
     let mut events_fetched = 0usize;
-    let mut markets_processed = 0usize;
+    let mut events_upserted = 0usize;
+    let mut merged: HashMap<String, EventInfo> = HashMap::new();
+    let mut fetched_open = 0usize;
+    let mut fetched_closed = 0usize;
+    let mut kept_events = 0usize;
 
-    for page_idx in 0..max_pages {
-        let offset = page_idx * page_limit;
-        let events = fetch_events_page(&client, mode, offset, page_limit).await?;
+    let statuses: Vec<EventStatusQuery> = match mode {
+        SyncMode::Incremental => vec![EventStatusQuery::ActiveOpen, EventStatusQuery::Closed],
+        SyncMode::Backfill => vec![EventStatusQuery::Open, EventStatusQuery::Closed],
+    };
 
-        if events.is_empty() {
-            break;
-        }
+    for status in statuses {
+        for page_idx in 0..max_pages {
+            let offset = page_idx * page_limit;
+            let events = fetch_events_page(&client, status, offset, page_limit).await?;
 
-        events_fetched += events.len();
-        let page_count = events.len();
-        info!(
-            "Fetched Polymarket events page {} (offset={}, events={})",
-            page_idx + 1,
-            offset,
-            page_count
-        );
+            if events.is_empty() {
+                break;
+            }
 
-        for event in events {
-            let event_payload = serde_json::to_string(&event)?;
-            let event_info = extract_event_info(&event);
+            events_fetched += events.len();
+            match status {
+                EventStatusQuery::ActiveOpen | EventStatusQuery::Open => {
+                    fetched_open += events.len()
+                }
+                EventStatusQuery::Closed => fetched_closed += events.len(),
+            }
+            let page_count = events.len();
+            info!(
+                "Fetched Polymarket events {:?} page {} (offset={}, events={})",
+                status,
+                page_idx + 1,
+                offset,
+                page_count
+            );
 
-            for market in extract_markets(&event) {
-                let row = build_market_row(&event_info, &market);
-                if row.market_id.is_empty() {
+            for event in events {
+                kept_events += 1;
+
+                let event_info = extract_event_info(&event);
+                if event_info.event_id.is_empty() {
                     continue;
                 }
 
-                let market_payload = serde_json::to_string(&market)?;
-                upsert_polymarket_market(
-                    pool,
-                    &row,
-                    &event_payload,
-                    &market_payload,
-                    sync_started_at,
-                )
-                .await?;
-                markets_processed += 1;
+                merged.insert(event_info.event_id.clone(), event_info);
             }
-        }
 
-        if page_count < page_limit {
-            break;
-        }
+            if page_count < page_limit {
+                break;
+            }
 
-        sleep(delay_between_requests).await;
+            sleep(delay_between_requests).await;
+        }
     }
 
-    let matured_markets = match mode {
-        SyncMode::ActiveOpen => mark_missing_markets_as_matured(pool, sync_started_at).await?,
-        SyncMode::BackfillAll => 0,
-    };
+    for event_info in merged.into_values() {
+        upsert_polymarket_event(
+            pool,
+            &PolymarketEventRow {
+                event_id: event_info.event_id,
+                event_title: event_info.title,
+                active: event_info.active,
+                closed: event_info.closed,
+                created_at: event_info.created_at,
+                updated_at: event_info.updated_at,
+            },
+        )
+        .await?;
+        events_upserted += 1;
+    }
+
+    info!(
+        "Polymarket fetch summary: fetched_total={}, fetched_open={}, fetched_closed={}, kept_events={}, upserted_unique={}",
+        events_fetched,
+        fetched_open,
+        fetched_closed,
+        kept_events,
+        events_upserted
+    );
 
     Ok(PolymarketSyncStats {
         events_fetched,
-        markets_processed,
-        matured_markets,
+        events_upserted,
     })
 }
 
@@ -139,10 +177,9 @@ pub async fn run_hourly_scheduler(pool: PgPool) {
                 match fetch_and_sync_markets(&pool).await {
                     Ok(stats) => {
                         info!(
-                            "Polymarket sync complete: events={}, markets={}, matured={}",
+                            "Polymarket sync complete: fetched={}, upserted={}",
                             stats.events_fetched,
-                            stats.markets_processed,
-                            stats.matured_markets
+                            stats.events_upserted
                         );
                     }
                     Err(err) => {
@@ -159,75 +196,13 @@ pub async fn run_hourly_scheduler(pool: PgPool) {
     info!("Polymarket scheduler stopped.");
 }
 
-#[derive(Clone, Debug)]
-struct EventInfo {
-    event_id: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
-    image: Option<String>,
-}
-
-fn extract_event_info(event: &Value) -> EventInfo {
-    EventInfo {
-        event_id: read_string(event, &["id", "eventId", "event_id"]),
-        title: read_string(event, &["title", "name"]),
-        description: read_string(event, &["description"]),
-        image: read_string(event, &["image", "icon"]),
-    }
-}
-
-fn extract_markets(event: &Value) -> Vec<Value> {
-    event
-        .get("markets")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn build_market_row(event: &EventInfo, market: &Value) -> PolymarketMarketRow {
-    let market_id =
-        read_string(market, &["id", "conditionId", "condition_id", "slug"]).unwrap_or_default();
-    let active = market
-        .get("active")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let closed = market
-        .get("closed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    PolymarketMarketRow {
-        market_id,
-        event_id: event.event_id.clone(),
-        event_title: event.title.clone(),
-        event_description: event.description.clone(),
-        event_image: event.image.clone(),
-        question: read_string(market, &["question", "title", "name"]),
-        description: read_string(market, &["description"]),
-        image: read_string(market, &["image", "icon"]),
-        active,
-        closed,
-        maturity_reached: closed || !active,
-        end_date: read_datetime(
-            market,
-            &[
-                "endDate",
-                "end_date",
-                "endTime",
-                "end_time",
-                "expirationDate",
-            ],
-        ),
-    }
-}
-
 async fn fetch_events_page(
     client: &reqwest::Client,
-    mode: SyncMode,
+    status: EventStatusQuery,
     offset: usize,
     limit: usize,
 ) -> Result<Vec<Value>, PolymarketIngestionError> {
-    let query = build_query(mode, offset, limit);
+    let query = build_query(status, offset, limit);
     let mut attempts = 0usize;
 
     loop {
@@ -271,6 +246,34 @@ async fn fetch_events_page(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EventStatusQuery {
+    ActiveOpen,
+    Open,
+    Closed,
+}
+
+fn build_query(
+    status: EventStatusQuery,
+    offset: usize,
+    limit: usize,
+) -> Vec<(&'static str, String)> {
+    let mut query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
+    match status {
+        EventStatusQuery::ActiveOpen => {
+            query.push(("active", "true".to_string()));
+            query.push(("closed", "false".to_string()));
+        }
+        EventStatusQuery::Open => {
+            query.push(("closed", "false".to_string()));
+        }
+        EventStatusQuery::Closed => {
+            query.push(("closed", "true".to_string()));
+        }
+    }
+    query
+}
+
 fn events_from_response(value: Value) -> Vec<Value> {
     if let Some(events) = value.as_array() {
         return events.to_vec();
@@ -281,6 +284,20 @@ fn events_from_response(value: Value) -> Vec<Value> {
     }
 
     Vec::new()
+}
+
+fn extract_event_info(event: &Value) -> EventInfo {
+    EventInfo {
+        event_id: read_string(event, &["id", "eventId", "event_id"]).unwrap_or_default(),
+        title: read_string(event, &["title", "name"]),
+        active: event.get("active").and_then(Value::as_bool).unwrap_or(true),
+        closed: event
+            .get("closed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        created_at: read_datetime(event, &["createdAt", "creationDate"]).unwrap_or_else(Utc::now),
+        updated_at: read_datetime(event, &["updatedAt"]).unwrap_or_else(Utc::now),
+    }
 }
 
 fn read_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -344,20 +361,6 @@ fn request_delay() -> Duration {
         .filter(|ms| *ms > 0)
         .unwrap_or(DEFAULT_REQUEST_DELAY_MS);
     Duration::from_millis(millis)
-}
-
-fn build_query(mode: SyncMode, offset: usize, limit: usize) -> Vec<(&'static str, String)> {
-    let mut query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-
-    match mode {
-        SyncMode::ActiveOpen => {
-            query.push(("active", "true".to_string()));
-            query.push(("closed", "false".to_string()));
-        }
-        SyncMode::BackfillAll => {}
-    }
-
-    query
 }
 
 fn retry_wait_duration(attempt: usize) -> Duration {

@@ -20,6 +20,7 @@ dialoguer = "0.12.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 thiserror = "2.0.17"
+toml = "0.8.19"
 
 [dev-dependencies]
 dotenvy = "0.15.7"
