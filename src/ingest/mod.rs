@@ -2,7 +2,7 @@ use crate::db::insert_rss_item;
 use crate::error::RssIngestionError;
 use crate::rss::{
     RssParser, bloomberg::BloombergRssParser, coindesk::CoindeskRssParser,
-    politico::PoliticoRssParser, reuters::ReutersRssParser,
+    politico::PoliticoRssParser, reuters::ReutersRssParser, wsj::WsjRssParser,
 };
 use sqlx::PgPool;
 use tokio::select;
@@ -20,8 +20,9 @@ static BLOOMBERG: BloombergRssParser = BloombergRssParser;
 static COINDESK: CoindeskRssParser = CoindeskRssParser;
 static REUTERS: ReutersRssParser = ReutersRssParser;
 static POLITICO: PoliticoRssParser = PoliticoRssParser;
+static WSJ: WsjRssParser = WsjRssParser;
 
-const FEEDS: [Feed; 10] = [
+const FEEDS: [Feed; 13] = [
     Feed {
         name: "bloomberg_wealth",
         url: "https://feeds.bloomberg.com/wealth/news.rss",
@@ -80,6 +81,24 @@ const FEEDS: [Feed; 10] = [
         name: "politico_politics",
         url: "https://rss.politico.com/politics-news.xml",
         parser: &POLITICO,
+        active: true,
+    },
+    Feed {
+        name: "wsj_world",
+        url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews",
+        parser: &WSJ,
+        active: true,
+    },
+    Feed {
+        name: "wsj_politics",
+        url: "https://feeds.content.dowjones.io/public/rss/socialpoliticsfeed",
+        parser: &WSJ,
+        active: true,
+    },
+    Feed {
+        name: "wsj_markets",
+        url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",
+        parser: &WSJ,
         active: true,
     },
 ];

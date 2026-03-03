@@ -2,6 +2,7 @@ pub mod bloomberg;
 pub mod coindesk;
 pub mod politico;
 pub mod reuters;
+pub mod wsj;
 
 use crate::error::RssParseError;
 use chrono::{DateTime, Utc};
