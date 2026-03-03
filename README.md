@@ -29,10 +29,32 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 - Ready to go!
 
 ## Installation
+### Option A (Recommended): deploy script
+
+Use the bundled deploy script to download and install the release binaries.
+
+1. **Run the script:**
+   ```bash
+   chmod +x script/deploy-raven-news.sh
+   ./script/deploy-raven-news.sh
+   ```
+2. **Enter the version when prompted:**
+   - Examples: `0.1.3` or `v0.1.3`
+3. **Verify installation:**
+   ```bash
+   raven-news --help
+   ```
+
+Notes:
+- The script downloads `x86_64-unknown-linux-gnu` release artifacts from GitHub Releases.
+- It installs all executable files from the release archive into `/usr/local/bin` (uses `sudo`).
+
+### Option B: manual installation
+
 1. **Download the release tarball:**
    ```bash
-   VERSION=v0.1.3  # check the latest version
-   wget https://github.com/skkugoon/RavenNews/releases/download/${VERSION}/raven-news-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+   VERSION=v0.1.3  # replace with the version you want
+   wget https://github.com/SKKUGoon/Raven-news/releases/download/${VERSION}/raven-news-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
    ```
 2. **Extract the binaries:**
    ```bash
@@ -160,37 +182,19 @@ Each parser defers to `RssItem::new`, which produces deterministic UUIDs by hash
 ## Project Structure
 
 ```
-├── migrations/                # SQLx migrations defining the warehouse schema
+├── migrations/                # SQLx migrations for RSS + Polymarket tables
+├── script/
+│   └── deploy-raven-news.sh   # Release deploy/install helper
 ├── src/
-│   ├── db/                    # PostgreSQL pool + insert & stats helpers
-│   ├── ingest/                # Fetchers and scheduler loop
-│   ├── rss/                   # Source-specific parsers implementing RssParser
+│   ├── db/                    # PostgreSQL pool, inserts, Polymarket + stats helpers
+│   ├── ingest/                # RSS and Polymarket ingestion orchestration
+│   ├── polymarket/            # Polymarket API client and event mapping
+│   ├── rss/                   # Source-specific RSS parsers implementing RssParser
 │   ├── error.rs               # Domain error types
-│   └── main.rs                # CLI entry point (clap-based)
+│   ├── lib.rs                 # Library exports
+│   └── main.rs                # CLI entry point
 ├── tests/                     # Integration tests and fixtures
-└── Cargo.toml
-```
-
-## Tests
-
-- Unit and integration tests can be run with:
-  ```bash
-  cargo test
-  ```
-- Database-aware tests expect `DATABASE_URL` to be set (use `.env` or environment variables when invoking `cargo test`).
-
-## Project Structure
-
-```
-├── migrations/                # SQLx migrations defining the warehouse schema
-├── src/
-│   ├── db/                    # PostgreSQL pool factory
-│   ├── rss/
-│   │   ├── bloomberg.rs       # Bloomberg RSS parser
-│   │   ├── coindesk.rs        # CoinDesk RSS parser
-│   │   └── reuters.rs         # Reuters RSS parser
-│   └── main.rs                # Binary entry point (customize for your needs)
-└── Cargo.toml
+└── Cargo.toml                 # Crate manifest
 ```
 
 ## Next Steps
