@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use dotenvy::dotenv;
 use raven_news::db::stats::{
     StatsPeriod, count_polymarket_events_by_period, count_rss_items_by_period_and_source,
     list_distinct_rss_sources,
 };
 use raven_news::db::{create_pg_pool, get_connection_status};
-use raven_news::ingest::{fetch_all_and_insert, run_scheduler};
+use raven_news::ingest::{
+    fetch_selected_and_insert, list_active_feed_names, run_scheduler_for_selected,
+};
 use raven_news::polymarket::{backfill_markets, fetch_and_sync_markets, run_hourly_scheduler};
 use sqlx::PgPool;
 use tracing::info;
@@ -18,10 +20,10 @@ use tracing_subscriber::{EnvFilter, filter::Directive};
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone, Copy)]
 enum Commands {
     /// Fetch RSS feeds one time and insert into DB (force snapshot)
     FetchOnce,
@@ -34,6 +36,17 @@ enum Commands {
 
     /// Show ingestion statistics (interactive period/source selector)
     Stats,
+}
+
+impl Commands {
+    fn label(self) -> &'static str {
+        match self {
+            Commands::FetchOnce => "fetch-once",
+            Commands::Run => "run",
+            Commands::Backfill => "backfill",
+            Commands::Stats => "stats",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -55,12 +68,38 @@ async fn main() {
     let pool = create_pg_pool(&database_url).await;
     print_startup_status(&pool).await;
 
-    match cli.command {
+    let command = cli.command.unwrap_or_else(select_command_interactive);
+
+    match command {
         Commands::FetchOnce => handle_fetch_once_with_choice(&pool).await,
         Commands::Run => handle_run_with_choice(pool).await,
         Commands::Backfill => handle_polymarket_backfill(&pool).await,
         Commands::Stats => handle_stats_interactive(&pool).await,
     };
+}
+
+fn select_command_interactive() -> Commands {
+    let commands = [
+        Commands::FetchOnce,
+        Commands::Run,
+        Commands::Backfill,
+        Commands::Stats,
+    ];
+    let labels: Vec<&str> = commands.iter().map(|cmd| cmd.label()).collect();
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select command")
+        .items(&labels)
+        .default(0)
+        .interact();
+
+    match selection {
+        Ok(index) => commands[index],
+        Err(err) => {
+            eprintln!("Command selection failed: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn init_tracing() {
@@ -74,18 +113,21 @@ fn init_tracing() {
         .init();
 }
 
-async fn handle_fetch_once(pool: &PgPool) {
-    info!("Running one-time fetch");
-    if let Err(e) = fetch_all_and_insert(pool).await {
-        eprintln!("Failed to fetch RSS feeds: {e}");
-        std::process::exit(1);
-    }
-}
-
 async fn handle_fetch_once_with_choice(pool: &PgPool) {
     match select_target("fetch-once") {
         IngestionTarget::Polymarket => handle_polymarket_fetch_once(pool).await,
-        IngestionTarget::NewsItems => handle_fetch_once(pool).await,
+        IngestionTarget::NewsItems => {
+            let selected_sources = select_rss_sources();
+            if selected_sources.is_empty() {
+                println!("No RSS sources selected. Nothing to run.");
+                return;
+            }
+
+            if let Err(e) = fetch_selected_and_insert(pool, &selected_sources).await {
+                eprintln!("Failed to fetch selected RSS feeds: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -96,8 +138,14 @@ async fn handle_run_with_choice(pool: PgPool) {
             run_hourly_scheduler(pool).await;
         }
         IngestionTarget::NewsItems => {
+            let selected_sources = select_rss_sources();
+            if selected_sources.is_empty() {
+                println!("No RSS sources selected. Nothing to run.");
+                return;
+            }
+
             info!("Running continuous RSS fetch");
-            run_scheduler(pool).await;
+            run_scheduler_for_selected(pool, &selected_sources).await;
         }
     }
 }
@@ -123,6 +171,32 @@ fn select_target(command: &str) -> IngestionTarget {
             eprintln!(
                 "Interactive selection failed ({err}). Run in an interactive terminal for `fetch-once` and `run`."
             );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn select_rss_sources() -> Vec<String> {
+    let sources = list_active_feed_names();
+    if sources.is_empty() {
+        return Vec::new();
+    }
+
+    let defaults = vec![true; sources.len()];
+
+    let selection = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select RSS sources (space to toggle, enter to confirm)")
+        .items(&sources)
+        .defaults(&defaults)
+        .interact();
+
+    match selection {
+        Ok(indices) => indices
+            .into_iter()
+            .map(|idx| sources[idx].to_string())
+            .collect(),
+        Err(err) => {
+            eprintln!("RSS source selection failed: {err}");
             std::process::exit(1);
         }
     }

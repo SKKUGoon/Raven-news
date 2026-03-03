@@ -2,9 +2,10 @@ use crate::db::insert_rss_item;
 use crate::error::RssIngestionError;
 use crate::rss::{
     RssParser, bloomberg::BloombergRssParser, coindesk::CoindeskRssParser,
-    politico::PoliticoRssParser, reuters::ReutersRssParser, wsj::WsjRssParser,
+    politico::PoliticoRssParser, wsj::WsjRssParser,
 };
 use sqlx::PgPool;
+use std::collections::HashSet;
 use tokio::select;
 use tokio::time::{Duration, interval};
 use tracing::info;
@@ -18,11 +19,10 @@ struct Feed {
 
 static BLOOMBERG: BloombergRssParser = BloombergRssParser;
 static COINDESK: CoindeskRssParser = CoindeskRssParser;
-static REUTERS: ReutersRssParser = ReutersRssParser;
 static POLITICO: PoliticoRssParser = PoliticoRssParser;
 static WSJ: WsjRssParser = WsjRssParser;
 
-const FEEDS: [Feed; 13] = [
+const FEEDS: [Feed; 10] = [
     Feed {
         name: "bloomberg_wealth",
         url: "https://feeds.bloomberg.com/wealth/news.rss",
@@ -46,24 +46,6 @@ const FEEDS: [Feed; 13] = [
         url: "https://www.coindesk.com/arc/outboundfeeds/rss",
         parser: &COINDESK,
         active: true,
-    },
-    Feed {
-        name: "reuters_financial",
-        url: "https://ir.thomsonreuters.com/rss/news-releases.xml?items=15",
-        parser: &REUTERS,
-        active: false, // Reuters financial no longer offers public free RSS feeds
-    },
-    Feed {
-        name: "reuters_events",
-        url: "https://ir.thomsonreuters.com/rss/events.xml?items=15",
-        parser: &REUTERS,
-        active: false,
-    },
-    Feed {
-        name: "reuters_secfilings",
-        url: "https://ir.thomsonreuters.com/rss/sec-filings.xml?items=15",
-        parser: &REUTERS,
-        active: false,
     },
     Feed {
         name: "politico_congress",
@@ -116,8 +98,30 @@ async fn fetch_and_insert(pool: &PgPool, feed: &Feed) -> Result<(), RssIngestion
     Ok(())
 }
 
-pub async fn fetch_all_and_insert(pool: &PgPool) -> Result<(), RssIngestionError> {
-    for feed in &FEEDS {
+fn active_feeds() -> Vec<&'static Feed> {
+    FEEDS.iter().filter(|feed| feed.active).collect()
+}
+
+fn resolve_selected_active_feeds(
+    selected_feed_names: &[String],
+) -> Result<Vec<&'static Feed>, RssIngestionError> {
+    let selected: HashSet<&str> = selected_feed_names.iter().map(String::as_str).collect();
+    let feeds: Vec<&'static Feed> = FEEDS
+        .iter()
+        .filter(|feed| feed.active && selected.contains(feed.name))
+        .collect();
+
+    if feeds.is_empty() {
+        return Err(RssIngestionError::Other(
+            "No active RSS feeds selected".to_string(),
+        ));
+    }
+
+    Ok(feeds)
+}
+
+async fn fetch_feeds(pool: &PgPool, feeds: &[&Feed]) -> Result<(), RssIngestionError> {
+    for feed in feeds {
         if let Err(err) = fetch_and_insert(pool, feed).await {
             return Err(RssIngestionError::Other(format!(
                 "Feed '{}' failed: {}",
@@ -129,15 +133,51 @@ pub async fn fetch_all_and_insert(pool: &PgPool) -> Result<(), RssIngestionError
     Ok(())
 }
 
+pub fn list_active_feed_names() -> Vec<&'static str> {
+    FEEDS
+        .iter()
+        .filter(|feed| feed.active)
+        .map(|feed| feed.name)
+        .collect()
+}
+
+pub async fn fetch_selected_and_insert(
+    pool: &PgPool,
+    selected_feed_names: &[String],
+) -> Result<(), RssIngestionError> {
+    let feeds = resolve_selected_active_feeds(selected_feed_names)?;
+    fetch_feeds(pool, &feeds).await
+}
+
+pub async fn fetch_all_and_insert(pool: &PgPool) -> Result<(), RssIngestionError> {
+    let feeds = active_feeds();
+    fetch_feeds(pool, &feeds).await
+}
+
 pub async fn run_scheduler(pool: PgPool) {
+    let feeds = active_feeds();
+    run_scheduler_for_feeds(pool, feeds).await;
+}
+
+pub async fn run_scheduler_for_selected(pool: PgPool, selected_feed_names: &[String]) {
+    match resolve_selected_active_feeds(selected_feed_names) {
+        Ok(feeds) => run_scheduler_for_feeds(pool, feeds).await,
+        Err(err) => eprintln!("Error selecting RSS feeds: {err}"),
+    }
+}
+
+async fn run_scheduler_for_feeds(pool: PgPool, feeds: Vec<&'static Feed>) {
     let mut ticker = interval(Duration::from_secs(60));
 
-    info!("Ingestion scheduler started. Press Ctrl+C to stop.");
+    info!(
+        "Ingestion scheduler started for {} feed(s). Press Ctrl+C to stop.",
+        feeds.len()
+    );
     loop {
         select! {
             _ = ticker.tick() => {
                 info!("Running scheduled RSS fetch...");
-                if let Err(e) = fetch_all_and_insert(&pool).await {
+                if let Err(e) = fetch_feeds(&pool, &feeds).await {
                     eprintln!("Error fetching RSS: {e}");
                 }
             }

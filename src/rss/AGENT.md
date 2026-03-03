@@ -5,7 +5,7 @@
 
 ## Files In This Folder
 - `mod.rs`: shared `RssItem`, `RssParser` trait, ID generation, and parser utilities (`strip_cdata`).
-- `bloomberg.rs`, `coindesk.rs`, `politico.rs`, `reuters.rs`, `wsj.rs`: source-specific parsers.
+- `bloomberg.rs`, `coindesk.rs`, `politico.rs`, `wsj.rs`: source-specific parsers.
 - `seeking_alpha.rs`: currently present but not wired into ingestion.
 
 ## How A Parser Should Be Crafted
