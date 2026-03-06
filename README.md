@@ -9,7 +9,7 @@ Raven News is a Rust-based CLI and library for ingesting, normalizing, and stori
 - Unified CLI for RSS + Polymarket ingestion, including one-shot, scheduler, backfill, and stats commands.
 - Source-specific RSS parsers built with `quick-xml`, each conforming to a shared `RssParser` trait.
 - Stable `RssItem` identifiers generated with SHA-256 fingerprints to avoid duplicates across runs.
-- PostgreSQL-backed persistence layer powered by `sqlx`, with dedicated warehouse tables for RSS and Polymarket markets.
+- PostgreSQL-backed persistence layer powered by `sqlx`, with dedicated warehouse tables for RSS and Polymarket event snapshots.
 - Async-ready foundation using `tokio`, structured logging via `tracing`, and integration tests with sample feeds.
 
 ## Developer Prerequisites
@@ -112,6 +112,10 @@ Notes:
   - `POLYMARKET_MAX_PAGES` (default `100`)
   - `POLYMARKET_PAGE_LIMIT` (default `100`, max `100`)
   - `POLYMARKET_REQUEST_DELAY_MS` (default `250`)
+- Polymarket spike detection tunables (`stats` -> `polymarket` -> `volume-spikes`):
+  - `POLYMARKET_SPIKE_MIN_VOLUME_DELTA` (default `10000`)
+  - `POLYMARKET_SPIKE_MIN_VOLUME_PCT` (default `0.5`, meaning 50%)
+  - `POLYMARKET_SPIKE_LIMIT` (default `20`)
 - Polymarket whitelist config lives in `polymarket_config.toml`:
   ```toml
   [whitelist]
@@ -125,7 +129,7 @@ Notes:
 | `cargo run -- fetch-once` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then run one-shot ingestion. |
 | `cargo run -- run` | Interactive selector (arrow keys): choose `polymarket` or `news items`, then start the selected scheduler. |
 | `cargo run -- backfill` | Backfill open Polymarket events using the events endpoint pagination (shows confirmation prompt). |
-| `cargo run -- stats` | Interactive selector: choose period first, then source (`polymarket` + distinct RSS sources from DB). |
+| `cargo run -- stats` | Interactive selector: choose source; for `polymarket` choose `event-count` or `volume-spikes`; RSS sources keep period-based counts. |
 
 ## Polymarket Ingestion
 
@@ -133,8 +137,11 @@ Notes:
 - Primary strategy: retrieve markets via paginated events (events include nested markets).
 - One-shot incremental sync is available through `fetch-once` by selecting `polymarket`.
 - Backfill sync (`backfill`) uses the same core pipeline without active/open filtering for broader market coverage.
-- Hourly sync is available through `run` by selecting `polymarket`.
+- Scheduler sync is available through `run` by selecting `polymarket`, aligned to `:00` and `:30` UTC.
 - Event rows are stored in `warehouse.polymarket_events` and synced by `event_id`.
+- Event interest metrics (`total_volume`, `volume_24h`, `open_interest`, `liquidity`) are stored per event.
+- Metric snapshots are appended to `warehouse.polymarket_event_metrics_history` for trend/spike detection.
+- Closed events are not updated again and do not receive new history snapshots.
 - `fetch-once` and `run` provide an interactive arrow-key selection between Polymarket and RSS ingestion.
 
 ## Parser Library
@@ -166,8 +173,10 @@ Each parser defers to `RssItem::new`, which produces deterministic UUIDs by hash
 - Migration `104_normalize_polymarket_events_markets.sql` adds `warehouse.polymarket_events` and normalizes market/event fields.
 - Migration `105_trim_polymarket_events_only.sql` trims Polymarket storage to event-only fields.
 - Migration `106_drop_unused_polymarket_tables.sql` removes deprecated Polymarket market/outcome tables.
+- Migration `109_add_polymarket_metrics_and_history.sql` adds event-level interest metrics and snapshot history.
 - `warehouse.rss_items` stores normalized RSS items with deterministic UUID keys.
-- `warehouse.polymarket_events` stores event-level metadata: `event_id`, `event_title`, `active`, `closed`, `created_at`, `updated_at`.
+- `warehouse.polymarket_events` stores event-level metadata and latest interest metrics.
+- `warehouse.polymarket_event_metrics_history` stores append-only metric snapshots used for volume spike detection.
 - Database helpers in `src/db/stats.rs` expose RSS total, daily, and per-source counts for reporting.
 
 ## Testing

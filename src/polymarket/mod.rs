@@ -1,5 +1,7 @@
-use crate::db::polymarket::{PolymarketEventRow, upsert_polymarket_event};
-use chrono::{DateTime, TimeZone, Utc};
+use crate::db::polymarket::{
+    PolymarketEventRow, insert_polymarket_event_metrics_history, upsert_polymarket_event,
+};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Timelike, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::time::Duration as StdDuration;
@@ -47,6 +49,10 @@ struct EventInfo {
     tags: Option<String>,
     tag_labels: Option<String>,
     end_date: Option<DateTime<Utc>>,
+    total_volume: Option<f64>,
+    volume_24h: Option<f64>,
+    open_interest: Option<f64>,
+    liquidity: Option<f64>,
     active: bool,
     closed: bool,
     created_at: DateTime<Utc>,
@@ -118,22 +124,25 @@ async fn sync_events(
                     continue;
                 }
 
-                upsert_polymarket_event(
-                    pool,
-                    &PolymarketEventRow {
-                        event_id: event_info.event_id,
-                        event_title: event_info.title,
-                        event_tag_slugs: event_info.tag_slugs,
-                        event_tags: event_info.tags,
-                        event_tag_labels: event_info.tag_labels,
-                        end_date: event_info.end_date,
-                        active: event_info.active,
-                        closed: event_info.closed,
-                        created_at: event_info.created_at,
-                        updated_at: event_info.updated_at,
-                    },
-                )
-                .await?;
+                let row = PolymarketEventRow {
+                    event_id: event_info.event_id,
+                    event_title: event_info.title,
+                    event_tag_slugs: event_info.tag_slugs,
+                    event_tags: event_info.tags,
+                    event_tag_labels: event_info.tag_labels,
+                    end_date: event_info.end_date,
+                    total_volume: event_info.total_volume,
+                    volume_24h: event_info.volume_24h,
+                    open_interest: event_info.open_interest,
+                    liquidity: event_info.liquidity,
+                    active: event_info.active,
+                    closed: event_info.closed,
+                    created_at: event_info.created_at,
+                    updated_at: event_info.updated_at,
+                };
+
+                upsert_polymarket_event(pool, &row).await?;
+                insert_polymarket_event_metrics_history(pool, &row).await?;
                 events_upserted += 1;
             }
 
@@ -147,9 +156,7 @@ async fn sync_events(
 
     info!(
         "Polymarket fetch summary: fetched_total={}, fetched_open={}, upserted={}",
-        events_fetched,
-        fetched_open,
-        events_upserted
+        events_fetched, fetched_open, events_upserted
     );
 
     Ok(PolymarketSyncStats {
@@ -159,7 +166,15 @@ async fn sync_events(
 }
 
 pub async fn run_hourly_scheduler(pool: PgPool) {
+    let initial_delay = next_half_hour_boundary_delay(Utc::now());
+    info!(
+        "Polymarket scheduler initial wait {}s to align at :00/:30 UTC",
+        initial_delay.as_secs()
+    );
+    sleep(initial_delay).await;
+
     let mut ticker = interval(Duration::from_secs(30 * 60));
+    ticker.tick().await;
 
     info!("Polymarket scheduler started. Sync interval: 30 minutes.");
     loop {
@@ -277,6 +292,7 @@ fn events_from_response(value: Value) -> Vec<Value> {
 
 fn extract_event_info(event: &Value) -> EventInfo {
     let (tag_slugs, tags, tag_labels) = extract_event_tags(event);
+    let total_volume = extract_total_volume(event);
 
     EventInfo {
         event_id: read_string(event, &["id", "eventId", "event_id"]).unwrap_or_default(),
@@ -285,6 +301,10 @@ fn extract_event_info(event: &Value) -> EventInfo {
         tags,
         tag_labels,
         end_date: read_datetime(event, &["endDate", "end_date"]),
+        total_volume,
+        volume_24h: read_f64(event, &["volume24hr", "volume_24h"]),
+        open_interest: read_f64(event, &["openInterest", "open_interest"]),
+        liquidity: read_f64(event, &["liquidity", "liquidityClob"]),
         active: event.get("active").and_then(Value::as_bool).unwrap_or(true),
         closed: event
             .get("closed")
@@ -293,6 +313,29 @@ fn extract_event_info(event: &Value) -> EventInfo {
         created_at: read_datetime(event, &["createdAt", "creationDate"]).unwrap_or_else(Utc::now),
         updated_at: read_datetime(event, &["updatedAt"]).unwrap_or_else(Utc::now),
     }
+}
+
+fn extract_total_volume(event: &Value) -> Option<f64> {
+    if let Some(volume) = read_f64(event, &["volume", "volumeNum", "volumeClob"]) {
+        return Some(volume);
+    }
+
+    sum_nested_market_volume(event)
+}
+
+fn sum_nested_market_volume(event: &Value) -> Option<f64> {
+    let markets = event.get("markets").and_then(Value::as_array)?;
+    let mut total = 0.0f64;
+    let mut any = false;
+
+    for market in markets {
+        if let Some(volume) = read_f64(market, &["volume", "volumeNum", "volumeClob"]) {
+            total += volume;
+            any = true;
+        }
+    }
+
+    if any { Some(total) } else { None }
 }
 
 fn extract_event_tags(event: &Value) -> (Option<String>, Option<String>, Option<String>) {
@@ -317,7 +360,11 @@ fn extract_event_tags(event: &Value) -> (Option<String>, Option<String>, Option<
         }
     }
 
-    (join_tag_values(slugs), join_tag_values(tags), join_tag_values(labels))
+    (
+        join_tag_values(slugs),
+        join_tag_values(tags),
+        join_tag_values(labels),
+    )
 }
 
 fn normalize_tag_value(value: &str) -> String {
@@ -374,6 +421,46 @@ fn read_datetime(value: &Value, keys: &[&str]) -> Option<DateTime<Utc>> {
         }
     }
     None
+}
+
+fn read_f64(value: &Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(raw) = value.get(*key) {
+            if let Some(num) = raw.as_f64() {
+                return Some(num);
+            }
+            if let Some(text) = raw.as_str() {
+                if let Ok(parsed) = text.parse::<f64>() {
+                    return Some(parsed);
+                }
+            }
+            if let Some(num) = raw.as_i64() {
+                return Some(num as f64);
+            }
+            if let Some(num) = raw.as_u64() {
+                return Some(num as f64);
+            }
+        }
+    }
+
+    None
+}
+
+fn next_half_hour_boundary_delay(now: DateTime<Utc>) -> Duration {
+    let mut next = now
+        .with_second(0)
+        .and_then(|dt| dt.with_nanosecond(0))
+        .unwrap_or(now);
+
+    if now.minute() < 30 {
+        next = next.with_minute(30).unwrap_or(next);
+    } else {
+        next = next.with_minute(0).unwrap_or(next) + ChronoDuration::hours(1);
+    }
+
+    (next - now)
+        .to_std()
+        .unwrap_or_else(|_| Duration::from_secs(0))
 }
 
 fn max_page_count() -> usize {

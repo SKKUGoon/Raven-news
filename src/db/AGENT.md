@@ -27,11 +27,13 @@
 - Match table contracts in `warehouse` schema:
   - `warehouse.rss_items`
   - `warehouse.polymarket_events`
+  - `warehouse.polymarket_event_metrics_history`
 
 ## Rules For Future DB Changes
 1. Keep data layer unaware of network/parsing concerns.
 2. Prefer additive query helpers over overloading existing ones with flags.
 3. If schema changes, update migrations first, then db query layer, then ingestion callers.
+4. For Polymarket events, preserve closed-event write suppression semantics in upsert/history queries.
 
 ## Validation Checklist
 - `cargo check`

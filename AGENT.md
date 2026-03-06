@@ -37,8 +37,9 @@ When changing CLI commands/subcommands/options:
 
 - Default market discovery strategy: paginated events endpoint (`/events`) and extract nested markets.
 - Keep backfill and incremental modes on a shared core pipeline, differing only in filtering strategy.
-- Do not hard-delete markets; mark lifecycle transition via status fields (e.g., `maturity_reached`).
-- Preserve raw payload columns for traceability when available.
+- Persist event-level interest metrics in `warehouse.polymarket_events` (latest snapshot) and history snapshots in `warehouse.polymarket_event_metrics_history`.
+- Closed-event storage rule: once an event is closed, do not continue updating it and do not append new metric history rows.
+- Scheduler cadence for Polymarket must remain 30 minutes and aligned to `:00` / `:30` (UTC unless explicitly overridden).
 
 ## Rate Limit and Retry Policy
 
@@ -59,5 +60,6 @@ Before finalizing changes:
 ## Documentation Quality Bar
 
 - `README.md` must reflect current commands and environment variables.
+- `AGENT.md` must be updated when operational policy changes (scheduler behavior, storage rules, ingestion guarantees).
 - Add concise operational notes for new long-running jobs/schedulers.
 - Keep examples copy-pasteable and consistent with actual binary/subcommand names.

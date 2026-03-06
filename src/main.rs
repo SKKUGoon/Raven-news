@@ -3,7 +3,7 @@ use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use dotenvy::dotenv;
 use raven_news::db::stats::{
     StatsPeriod, count_polymarket_events_by_period, count_rss_items_by_period_and_source,
-    list_distinct_rss_sources,
+    list_distinct_rss_sources, list_polymarket_volume_spikes,
 };
 use raven_news::db::{create_pg_pool, get_connection_status};
 use raven_news::ingest::{
@@ -13,6 +13,10 @@ use raven_news::polymarket::{backfill_markets, fetch_and_sync_markets, run_hourl
 use sqlx::PgPool;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, filter::Directive};
+
+const DEFAULT_SPIKE_MIN_VOLUME_DELTA: f64 = 10_000.0;
+const DEFAULT_SPIKE_MIN_VOLUME_PCT: f64 = 0.5;
+const DEFAULT_SPIKE_LIMIT: i64 = 20;
 
 #[derive(Parser)]
 #[command(name = "raven-news")]
@@ -246,30 +250,25 @@ async fn handle_polymarket_backfill(pool: &PgPool) {
 }
 
 async fn handle_stats_interactive(pool: &PgPool) {
-    let period = select_period();
-    let (label, count) = match select_source(pool).await {
-        StatsSource::Polymarket => {
-            let count = count_polymarket_events_by_period(pool, period).await;
-            ("polymarket".to_string(), count)
-        }
+    match select_source(pool).await {
+        StatsSource::Polymarket => handle_polymarket_stats(pool).await,
         StatsSource::Rss(source) => {
+            let period = select_period();
             let count = count_rss_items_by_period_and_source(pool, period, &source).await;
-            (source, count)
-        }
-    };
-
-    match count {
-        Ok(value) => {
-            println!(
-                "Stats | period={} | source={} | count={}",
-                period_label(period),
-                label,
-                value
-            );
-        }
-        Err(err) => {
-            eprintln!("Failed to fetch stats: {err}");
-            std::process::exit(1);
+            match count {
+                Ok(value) => {
+                    println!(
+                        "Stats | period={} | source={} | count={}",
+                        period_label(period),
+                        source,
+                        value
+                    );
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch stats: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
@@ -278,6 +277,12 @@ async fn handle_stats_interactive(pool: &PgPool) {
 enum StatsSource {
     Polymarket,
     Rss(String),
+}
+
+#[derive(Clone, Copy)]
+enum PolymarketStatsMode {
+    EventCount,
+    VolumeSpikes,
 }
 
 fn select_period() -> StatsPeriod {
@@ -337,11 +342,125 @@ async fn select_source(pool: &PgPool) -> StatsSource {
     }
 }
 
+async fn handle_polymarket_stats(pool: &PgPool) {
+    match select_polymarket_stats_mode() {
+        PolymarketStatsMode::EventCount => {
+            let period = select_period();
+            match count_polymarket_events_by_period(pool, period).await {
+                Ok(value) => {
+                    println!(
+                        "Stats | period={} | source=polymarket | count={}",
+                        period_label(period),
+                        value
+                    );
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch stats: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PolymarketStatsMode::VolumeSpikes => {
+            let min_delta = spike_min_volume_delta();
+            let min_pct = spike_min_volume_pct();
+            let limit = spike_limit();
+
+            match list_polymarket_volume_spikes(pool, min_delta, min_pct, limit).await {
+                Ok(spikes) => {
+                    if spikes.is_empty() {
+                        println!(
+                            "No Polymarket volume spikes found (delta >= {:.0}, pct >= {:.0}%).",
+                            min_delta,
+                            min_pct * 100.0
+                        );
+                        return;
+                    }
+
+                    println!(
+                        "Polymarket volume spikes (delta >= {:.0}, pct >= {:.0}%):",
+                        min_delta,
+                        min_pct * 100.0
+                    );
+                    for spike in spikes {
+                        let title = spike
+                            .event_title
+                            .unwrap_or_else(|| "(untitled event)".to_string());
+                        let current = spike.total_volume.unwrap_or(0.0);
+                        let previous = spike.previous_total_volume.unwrap_or(0.0);
+                        let pct = spike.volume_pct.map(|value| value * 100.0).unwrap_or(0.0);
+
+                        println!(
+                            "- {} | id={} | current={:.2} | prev={:.2} | delta={:.2} | pct={:.2}% | captured_at={}",
+                            title,
+                            spike.event_id,
+                            current,
+                            previous,
+                            spike.volume_delta,
+                            pct,
+                            spike.captured_at
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch Polymarket volume spikes: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+fn select_polymarket_stats_mode() -> PolymarketStatsMode {
+    let options = ["event-count", "volume-spikes"];
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select Polymarket stats mode")
+        .items(options)
+        .default(0)
+        .interact();
+
+    match selection {
+        Ok(0) => PolymarketStatsMode::EventCount,
+        Ok(1) => PolymarketStatsMode::VolumeSpikes,
+        Ok(_) => {
+            eprintln!("Invalid Polymarket stats selection.");
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("Polymarket stats selection failed: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn period_label(period: StatsPeriod) -> &'static str {
     match period {
         StatsPeriod::AllTime => "all-time",
         StatsPeriod::Today => "today",
     }
+}
+
+fn spike_min_volume_delta() -> f64 {
+    std::env::var("POLYMARKET_SPIKE_MIN_VOLUME_DELTA")
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| *value >= 0.0)
+        .unwrap_or(DEFAULT_SPIKE_MIN_VOLUME_DELTA)
+}
+
+fn spike_min_volume_pct() -> f64 {
+    std::env::var("POLYMARKET_SPIKE_MIN_VOLUME_PCT")
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| *value >= 0.0)
+        .unwrap_or(DEFAULT_SPIKE_MIN_VOLUME_PCT)
+}
+
+fn spike_limit() -> i64 {
+    std::env::var("POLYMARKET_SPIKE_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SPIKE_LIMIT)
 }
 
 async fn print_startup_status(pool: &PgPool) {
